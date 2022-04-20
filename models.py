@@ -7,18 +7,23 @@ LOG_FREQ = 10000
 
 def encode(encoder,inputs,feature_dim):
     assert (inputs.shape[1] % 3 == 0), "Inputs must be stacked RGB frames"
+    assert (len(inputs.shape) == 4), "Inputs must be Bx3*nb_framesxWxH"
     if inputs.max() >1:
         inputs = inputs/255.
-    number_frames = inputs.shape[1] // 3
-    f = torch.zeros((inputs.shape[0],(2*number_frames-1)*feature_dim)).to('cuda')
-    for i in range(number_frames):
-        f[:,384*2*i:384*(2*i+1)]=encoder(inputs[:,3*i:3*(i+1),:,:])
-    for i in range(number_frames-1):
-        f[:,384*(2*i+1):384*2*(i+1)] = -f[:,384*2*i:384*(2*i+1)] + f[:,384*2*(i+1):384*(2*(i+1)+1)]
+    batch,nb_frames,W,H = inputs.shape
+    nb_frames = nb_frames//3
+    inputs = inputs.view(batch*nb_frames,3,W,H)
+    z = encoder(inputs).view(batch,nb_frames,feature_dim)
+    z_t = z[:,1:,:]
+    z_t_1 = z[:,:-1,:].detach()
+    delta = z_t - z_t_1
+    f = torch.cat([z,delta], axis = 1)
+    f = torch.flatten(f,1,2)
     return f
 
 class Actor(nn.Module):
-    def __init__(self,encoder,freeze_encoder,action_shape,hidden_dim,log_std_min,log_std_max,feature_dim):
+    def __init__(self,encoder,freeze_encoder,action_shape,hidden_dim,log_std_min,log_std_max,
+    feature_dim,projection_dim):
         super().__init__()
 
         self.encoder = encoder
@@ -30,8 +35,12 @@ class Actor(nn.Module):
         self.log_std_min = log_std_min
         self.log_std_max = log_std_max
 
+        self.proj = nn.Sequential(
+            nn.Linear(5*feature_dim,projection_dim),
+            nn.LayerNorm(projection_dim),
+        )
         self.pi = nn.Sequential(
-            nn.Linear(5*feature_dim,hidden_dim),
+            nn.Linear(projection_dim,hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim,hidden_dim),
             nn.ReLU(),
@@ -63,7 +72,8 @@ class Actor(nn.Module):
                 f = self.encoder(inputs)
         else:
             f = inputs
-        mu_std = self.pi(f)
+        fproj = self.proj(f)
+        mu_std = self.pi(fproj)
         mu,log_std = mu_std.chunk(2,dim=-1)
         log_std = self.log_std_min + 0.5 * (self.log_std_max - self.log_std_min) * (torch.tanh(log_std) + 1)
 
@@ -80,11 +90,12 @@ class Actor(nn.Module):
         return mu,log_std,pi,log_pi,f
 
 class QNetwork(nn.Module):
-    def __init__(self,hidden_dim,feature_dim,action_shape):
+    def __init__(self,hidden_dim,projection_dim,action_shape):
         super().__init__()
 
+
         self.Qfunction = nn.Sequential(
-            nn.Linear(feature_dim+action_shape,hidden_dim),
+            nn.Linear(projection_dim+action_shape,hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim,hidden_dim),
             nn.ReLU(),
@@ -107,13 +118,19 @@ class QNetwork(nn.Module):
         return self.Qfunction(inputs)
 
 class Critic(nn.Module):
-    def __init__(self,encoder,freeze_encoder,feature_dim,action_shape,hidden_dim):
+    def __init__(self,encoder,freeze_encoder,feature_dim,action_shape,hidden_dim,projection_dim):
         super().__init__()
 
         self.encoder = encoder
         self.freeze_encoder = freeze_encoder
-        self.Q1 = QNetwork(hidden_dim,5*feature_dim,action_shape[0])
-        self.Q2 = QNetwork(hidden_dim,5*feature_dim,action_shape[0])
+
+        self.proj = nn.Sequential(
+            nn.Linear(5*feature_dim,projection_dim),
+            nn.LayerNorm(projection_dim),
+        )
+
+        self.Q1 = QNetwork(hidden_dim,projection_dim,action_shape[0])
+        self.Q2 = QNetwork(hidden_dim,projection_dim,action_shape[0])
         self.feature_dim = feature_dim
 
     def forward(self,inputs,actions, from_obs=True):
@@ -125,6 +142,7 @@ class Critic(nn.Module):
                 f = self.encoder(inputs)
         else:
             f = inputs
-        q1 = self.Q1(actions,f)
-        q2 = self.Q2(actions,f)
+        fproj = self.proj(f)
+        q1 = self.Q1(actions,fproj)
+        q2 = self.Q2(actions,fproj)
         return q1,q2

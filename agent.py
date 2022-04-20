@@ -33,6 +33,7 @@ class SAC(object):
         detach_encoder=True,
         curl_latent_dim=128,
         encoder_tau = .05,
+        projection_dim = 128,
         **kwargs
     ):
         self.device = device
@@ -45,18 +46,19 @@ class SAC(object):
         self.curl_latent_dim = curl_latent_dim
         self.detach_encoder = detach_encoder
         self.encoder_tau = encoder_tau
+        self.projection_dim = projection_dim
         
         self.actor = Actor(
             encoder,self.detach_encoder, action_shape, hidden_dim,
-            actor_log_std_min, actor_log_std_max,encoder_output
+            actor_log_std_min, actor_log_std_max,encoder_output,projection_dim
         ).to(device)
 
         self.critic = Critic(
-            encoder,self.detach_encoder,encoder_output, action_shape, hidden_dim,
+            encoder,self.detach_encoder,encoder_output, action_shape, hidden_dim,projection_dim
         ).to(device)
 
         self.critic_target = Critic(
-            encoder,self.detach_encoder,encoder_output, action_shape, hidden_dim,
+            encoder,self.detach_encoder,encoder_output, action_shape, hidden_dim,projection_dim
         ).to(device)
 
         self.critic_target.load_state_dict(self.critic.state_dict())
@@ -66,11 +68,13 @@ class SAC(object):
         self.target_entropy = -np.prod(action_shape)
 
         self.actor_optimizer = torch.optim.Adam(
-            self.actor.pi.parameters(), lr=actor_lr, betas=(actor_beta, 0.999)
+            list(self.critic.proj.parameters())+list(self.actor.pi.parameters()),
+            lr=actor_lr, betas=(actor_beta, 0.999)
         )
 
         self.critic_optimizer = torch.optim.Adam(
-            list(self.critic.Q1.parameters())+list(self.critic.Q1.parameters()), lr=critic_lr, betas=(critic_beta, 0.999)
+            list(self.critic.proj.parameters())+list(self.critic.Q1.parameters())+list(self.critic.Q1.parameters()), 
+            lr=critic_lr, betas=(critic_beta, 0.999)
         )
 
         self.log_alpha_optimizer = torch.optim.Adam(
@@ -103,7 +107,7 @@ class SAC(object):
 
     def critic_step(self,obs,action,reward,next_obs,not_done,L,step):
         with torch.no_grad():
-            _,_,pi,log_pi=self.actor(next_obs,from_obs=False)
+            _,_,pi,log_pi,_=self.actor(next_obs,from_obs=False)
             target_Q1, target_Q2 = self.critic_target(next_obs, pi,from_obs=False)
             target_V = torch.min(target_Q1,
                                  target_Q2) - self.alpha.detach() * log_pi
@@ -124,7 +128,7 @@ class SAC(object):
         self.critic_optimizer.step()
 
     def actor_alpha_step(self,obs,L,step):
-        _,_,pi,log_pi = self.actor(obs,from_obs=False)
+        _,_,pi,log_pi,_ = self.actor(obs,from_obs=False)
         actor_Q1, actor_Q2 = self.critic(obs, pi,from_obs=False)
 
         actor_Q = torch.min(actor_Q1, actor_Q2)

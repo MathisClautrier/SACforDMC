@@ -7,6 +7,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 import utils
 
+def tie_projecion_layers(actor,critic):
+    assert (len(actor.proj) == len(critic.proj)), "The two models must share the same architecture"
+    N = len(actor.proj)
+    for i in range(N):
+        assert (type(actor.proj[i])==type(critic.proj[i])), "The two models must share the same architecture"
+        actor.proj[i].weight = critic.proj[i].weight
+        actor.proj[i].bias = critic.proj[i].bias
+
 class SAC(object):
     def __init__(
         self,
@@ -63,17 +71,19 @@ class SAC(object):
 
         self.critic_target.load_state_dict(self.critic.state_dict())
 
+        tie_projecion_layers(self.actor,self.critic)
+
         self.log_alpha = torch.tensor(np.log(init_temperature)).to(device)
         self.log_alpha.requires_grad = True
         self.target_entropy = -np.prod(action_shape)
 
         self.actor_optimizer = torch.optim.Adam(
-            list(self.critic.proj.parameters())+list(self.actor.pi.parameters()),
+            self.actor.pi.parameters(),
             lr=actor_lr, betas=(actor_beta, 0.999)
         )
 
         self.critic_optimizer = torch.optim.Adam(
-            list(self.critic.proj.parameters())+list(self.critic.Q1.parameters())+list(self.critic.Q1.parameters()), 
+            list(self.critic.proj.parameters())+list(self.critic.Q1.parameters())+list(self.critic.Q2.parameters()), 
             lr=critic_lr, betas=(critic_beta, 0.999)
         )
 
@@ -176,6 +186,15 @@ class SAC(object):
                     self.critic.encoder, self.critic_target.encoder,
                     self.encoder_tau
                 )
+                utils.soft_update_params(
+                        self.critic.proj, self.critic_target.proj,
+                        self.encoder_tau
+                )
+            else:
+                utils.soft_update_params(
+                        self.critic.proj, self.critic_target.proj,
+                        self.encoder_tau
+                    )
     
     def save(self, model_dir, step):
         torch.save(
